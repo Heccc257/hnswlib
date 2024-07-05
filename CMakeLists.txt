@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.0...3.26)
 
 set(CMAKE_CXX_STANDARD 17) # 设置C++标准为C++17
 set(CMAKE_CXX_STANDARD_REQUIRED ON) # 确保编译器支持C++17
-
+set(CMAKE_BUILD_TYPE Debug)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0")
 project(hnswlib
     LANGUAGES CXX)
 
