@@ -28,7 +28,7 @@ public:
 
     void train(int N, std::vector<float> &xb);
 
-    std::vector<int> get_centroids_id(int id);
+    std::vector<uint8_t> get_centroids_id(int id);
     float* get_centroid_data(int quantizer, int code_id);
 
     float calc_dist(int d, float *vec1, float *vec2);
@@ -36,6 +36,7 @@ public:
 
 
     std::vector<float> pq_dist_cache;
+    std::vector<uint8_t> pq_dist_cache_quantized;
     void clear_pq_dist_cache();
 
     std::vector<float> qdata;
@@ -52,7 +53,14 @@ public:
     float calc_dist_pq_from_table(int data_id, vector<int>& qids);
     float calc_dist_pq_simd(int data_id, float *qdata, bool use_cache);
     float calc_dist_pq_loaded_simd(int data_id);
+    void quantize_lookup_table();
+    float dequantize(uint8_t value, float min, float max);
+    float scaling_factors_min;
+    float scaling_factors_max;
+    float scale;
     
+    float *pq_dist_cache_data;
+    uint8_t* pq_dist_cache_data_quantized;
 };
 
 #endif // !PQ_DIST_H

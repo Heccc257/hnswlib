@@ -13,4 +13,6 @@ var/
 *.pyc
 
 statis/*
-test*
+point_search.txt
+not_find.txt
+find.txt
