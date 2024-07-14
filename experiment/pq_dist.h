@@ -55,9 +55,9 @@ public:
     float calc_dist_pq_loaded_simd(int data_id);
     void quantize_lookup_table();
     float dequantize(uint8_t value, float min, float max);
-    float scaling_factors_min;
-    float scaling_factors_max;
-    float scale;
+    vector<float> scaling_factors_min;
+    vector<float> scaling_factors_max;
+    vector<float> scales;
     
     float *pq_dist_cache_data;
     uint8_t* pq_dist_cache_data_quantized;

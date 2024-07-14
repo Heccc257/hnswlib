@@ -21,6 +21,9 @@ PQDist::PQDist(int _d, int _m, int _nbits) : d(_d), m(_m), nbits(_nbits)
 
     pq_dist_cache.resize(m * code_nums);
     pq_dist_cache_quantized.resize(m * code_nums);
+    scaling_factors_max.resize(m);
+    scaling_factors_min.resize(m);
+    scales.resize(m);
     qdata.resize(d);
 
     space = std::move(unique_ptr<hnswlib::SpaceInterface<float>>(new hnswlib::L2Space(d_pq)));
@@ -175,18 +178,21 @@ void PQDist::load_query_data_and_cache(const float *_qdata)
     memcpy(qdata.data(), _qdata, sizeof(float) * d);
     clear_pq_dist_cache();
     use_cache = true;
-    scaling_factors_max = 1e-9;
-    scaling_factors_min = 1e9;
-    for (int i = 0; i < m * code_nums; i++)
-    {
-        pq_dist_cache[i] = calc_dist(d_pq, get_centroid_data(i / code_nums, i % code_nums), qdata.data() + (i / code_nums) * d_pq);
-        scaling_factors_max = max(scaling_factors_max, pq_dist_cache[i]);
-        scaling_factors_min = min(scaling_factors_min, pq_dist_cache[i]);
-    }
-    scale = (scaling_factors_max - scaling_factors_min) / 255.0f;
-    for (int i = 0; i < m * code_nums; i++)
-    {
-        pq_dist_cache_quantized[i] = static_cast<uint8_t>((pq_dist_cache[i] - scaling_factors_min) / scale);
+    for(int i = 0; i < m ; i++){
+        scaling_factors_max[i] = 1e-9;
+        scaling_factors_min[i] = 1e9;
+        for(int j = 0; j < code_nums; j++){
+            int index = i * code_nums + j;
+            float d = calc_dist(d_pq, get_centroid_data(i, j), qdata.data() + i * d_pq);
+            pq_dist_cache[index] = d;
+            scaling_factors_max[i] = max(scaling_factors_max[i], d);
+            scaling_factors_min[i] = min(scaling_factors_min[i], d);
+        }
+        scales[i] = (scaling_factors_max[i] - scaling_factors_min[i]) / 255.0f;
+        for(int j = 0; j < code_nums; j++){
+            int index = i * code_nums + j;
+            pq_dist_cache_quantized[index] = (pq_dist_cache[index] - scaling_factors_min[i]) / scales[i];
+        }
     }
     pq_dist_cache_data_quantized = pq_dist_cache_quantized.data();
     _mm_prefetch(pq_dist_cache_data, _MM_HINT_NTA);
@@ -291,12 +297,12 @@ float PQDist::calc_dist_pq_(int data_id, float *qdata, bool use_cache = true)
 
 
 float PQDist::calc_dist_pq_simd(int data_id, float *qdata, bool use_cache) {
-    int dist = 0;
+    float dist = 0;
     std::vector<uint8_t> ids = get_centroids_id(data_id);
     for(int i = 0; i < m; i++) {
-        dist += pq_dist_cache_quantized[i*code_nums + ids[i]];
+        dist += pq_dist_cache_quantized[i*code_nums + ids[i]] * scales[i] + scaling_factors_min[i];
     }
-    return dist * scale + scaling_factors_min;
+    return dist;
 }
 
 
