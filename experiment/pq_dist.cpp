@@ -61,7 +61,7 @@ vector<uint8_t> PQDist::get_centroids_id(int id)
             _mm256_storeu_si256(reinterpret_cast<__m256i *>(centroids_id.data() + i), input);
         }
         for (; i < num_bytes; i++)
-            centroids[i] = code[i];
+            centroids_id[i] = code[i];
     }
     else
     {
