@@ -78,7 +78,7 @@ int main(int argc, char *argv[])
 
     //hnswlib::SpaceInterface<float> *space2 = new hnswlib::L2Space(data_loader->get_dim() / 2);
 
-    ifstream file("../point_search.txt");
+    ifstream file("/share/ann_benchmarks/point_search.txt");
     string line;
     vector<vector<int>> points_search(1000);
     int t = 0;
