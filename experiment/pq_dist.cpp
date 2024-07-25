@@ -5,7 +5,7 @@
 
 using namespace std;
 
-PQDist::PQDist(int _d, int _m, int _nbits) : d(_d), m(_m), nbits(_nbits)
+PQDist::PQDist(int _d, int _m, int _nbits, QuantizationType _qtype) : d(_d), m(_m), nbits(_nbits), qtype(_qtype)
 {
     indexPQ = std::move(std::make_unique<faiss::IndexPQ>(d, m, nbits));
     code_nums = 1 << nbits;
@@ -20,10 +20,25 @@ PQDist::PQDist(int _d, int _m, int _nbits) : d(_d), m(_m), nbits(_nbits)
     }
 
     pq_dist_cache.resize(m * code_nums);
-    pq_dist_cache_quantized.resize(m * code_nums);
+    switch (qtype)
+    {
+    case QuantizationType::UINT8:
+        pq_dist_cache_quantized_uint8.resize(m * code_nums);
+        pq_dist_cache_data_quantized_uint8 = pq_dist_cache_quantized_uint8.data();
+        break;
+    case QuantizationType::UINT16:
+        pq_dist_cache_quantized_uint16.resize(m * code_nums);
+        pq_dist_cache_data_quantized_uint16 = pq_dist_cache_quantized_uint16.data();
+        break;
+    case QuantizationType::UINT32:
+        pq_dist_cache_quantized_uint32.resize(m * code_nums);
+        pq_dist_cache_data_quantized_uint32 = pq_dist_cache_quantized_uint32.data();
+        break;
+    }
     qdata.resize(d);
 
     space = std::move(unique_ptr<hnswlib::SpaceInterface<float>>(new hnswlib::L2Space(d_pq)));
+    pq_dist_cache_data = pq_dist_cache.data();
     /* scaling_factors_max.resize(m);
     scaling_factors_min.resize(m); */
 }
@@ -105,15 +120,6 @@ vector<uint8_t> PQDist::get_centroids_id(int id)
             centroids_id[j + 1] = (code[i] >> 4) & 0x0F; // 提取高4位
         }
     }
-    // int mask = (1<<nbits) - 1;
-    // int off = 0;
-    // for (int i = 0; i < m; i++) {
-    //     centroids_id[i] = ((int)(((*code)>>off) & mask));
-    //     off = (off + nbits) & 7; // mod 8
-    //     if (!off) {
-    //         code += 1; // 下一个code字节
-    //     }
-    // }
     return centroids_id;
 }
 
@@ -127,10 +133,6 @@ float PQDist::calc_dist(int d, float *vec1, float *vec2)
 {
     assert(d == *reinterpret_cast<int *>(space->get_dist_func_param()));
     return space->get_dist_func()(vec1, vec2, space->get_dist_func_param());
-    // float ans = 0;
-    // for (int i = 0; i < d; i++)
-    //     ans += (vec1[i] - vec2[i]) * (vec1[i] - vec2[i]);f
-    // return ans;
 }
 
 float PQDist::calc_dist_pq(int data_id, float *qdata, bool use_cache = true)
@@ -175,143 +177,128 @@ void PQDist::load_query_data_and_cache(const float *_qdata)
     memcpy(qdata.data(), _qdata, sizeof(float) * d);
     clear_pq_dist_cache();
     use_cache = true;
+    for (int i = 0; i < m * code_nums; i++)
+    {
+        pq_dist_cache_data[i] = calc_dist(d_pq, get_centroid_data(i / code_nums, i % code_nums), qdata.data() + (i / code_nums) * d_pq);
+    }
+    _mm_prefetch(pq_dist_cache_data, _MM_HINT_NTA);
+    size_t prefetch_size = 128;
+    int s = pq_dist_cache.size();
+    for (int i = 0; i < s; i += prefetch_size / 4)
+    {
+        _mm_prefetch(pq_dist_cache_data + i, _MM_HINT_NTA);
+    }
+}
+void PQDist::load_query_data_and_cache_quantized(const float *_qdata)
+{
+    memcpy(qdata.data(), _qdata, sizeof(float) * d);
+    clear_pq_dist_cache();
+    use_cache = true;
     scaling_factors_max = 1e-9;
     scaling_factors_min = 1e9;
     for (int i = 0; i < m * code_nums; i++)
     {
-        pq_dist_cache[i] = calc_dist(d_pq, get_centroid_data(i / code_nums, i % code_nums), qdata.data() + (i / code_nums) * d_pq);
-        scaling_factors_max = max(scaling_factors_max, pq_dist_cache[i]);
-        scaling_factors_min = min(scaling_factors_min, pq_dist_cache[i]);
+        pq_dist_cache_data[i] = calc_dist(d_pq, get_centroid_data(i / code_nums, i % code_nums), qdata.data() + (i / code_nums) * d_pq);
+        scaling_factors_min = min(scaling_factors_min, pq_dist_cache_data[i]);
+        scaling_factors_max = max(scaling_factors_max, pq_dist_cache_data[i]);
     }
-    scale = (scaling_factors_max - scaling_factors_min) / 255.0f;
-    for (int i = 0; i < m * code_nums; i++)
-    {
-        pq_dist_cache_quantized[i] = static_cast<uint8_t>((pq_dist_cache[i] - scaling_factors_min) / scale);
-    }
-    pq_dist_cache_data_quantized = pq_dist_cache_quantized.data();
     _mm_prefetch(pq_dist_cache_data, _MM_HINT_NTA);
-
     size_t prefetch_size = 128;
-    for (int i = 0; i < pq_dist_cache_quantized.size(); i += prefetch_size)
+    int s = pq_dist_cache.size();
+    for (int i = 0; i < s; i += prefetch_size / 4)
     {
-        _mm_prefetch(pq_dist_cache_data_quantized + i, _MM_HINT_NTA);
+        _mm_prefetch(pq_dist_cache_data + i, _MM_HINT_NTA);
     }
-}
-float PQDist::calc_dist_pq_(int data_id, float *qdata, bool use_cache = true)
-{
-    float dist = 0;
-    auto ids = get_centroids_id(data_id);
-    for (int q = 0; q < m; q++)
+    switch (qtype)
     {
-        dist += pq_dist_cache[q * code_nums + ids[q]];
+    case QuantizationType::UINT8:
+        scale = (scaling_factors_max - scaling_factors_min) / 255.0f;
+        for (int i = 0; i < m * code_nums; i++)
+        {
+            pq_dist_cache_quantized_uint8[i] = round((pq_dist_cache_data[i] - scaling_factors_min) / scale);
+        }
+        _mm_prefetch(pq_dist_cache_data_quantized_uint8, _MM_HINT_NTA);
+        for (int i = 0; i < m * code_nums; i += prefetch_size / sizeof(uint8_t))
+        {
+            _mm_prefetch(pq_dist_cache_data_quantized_uint8 + i, _MM_HINT_NTA);
+        }
+        break;
+    case QuantizationType::UINT16:
+        scale = (scaling_factors_max - scaling_factors_min) / 65535.0f;
+        for (int i = 0; i < m * code_nums; i++)
+        {
+            pq_dist_cache_quantized_uint16[i] = round((pq_dist_cache_data[i] - scaling_factors_min) / scale);
+        }
+        _mm_prefetch(pq_dist_cache_data_quantized_uint16, _MM_HINT_NTA);
+        for (int i = 0; i < m * code_nums; i += prefetch_size / sizeof(uint16_t))
+        {
+            _mm_prefetch(pq_dist_cache_data_quantized_uint16 + i, _MM_HINT_NTA);
+        }
+        break;
+    case QuantizationType::UINT32:
+        scale = (scaling_factors_max - scaling_factors_min) / 4294967295.0f;
+        for (int i = 0; i < m * code_nums; i++)
+        {
+            pq_dist_cache_quantized_uint32[i] = round((pq_dist_cache_data[i] - scaling_factors_min) / scale);
+        }
+        _mm_prefetch(pq_dist_cache_data_quantized_uint32, _MM_HINT_NTA);
+        for (int i = 0; i < m * code_nums; i += prefetch_size / sizeof(uint32_t))
+        {
+            _mm_prefetch(pq_dist_cache_data_quantized_uint32 + i, _MM_HINT_NTA);
+        }
+        break;
     }
-    return dist;
 }
 
-/* float PQDist::calc_dist_pq_simd(int data_id, float *qdata, bool use_cache)
+float PQDist::calc_dist_pq_simd(int data_id, float *qdata, bool use_cache)
 {
     float dist = 0;
     std::vector<uint8_t> ids = get_centroids_id(data_id);
-    const uint8_t *code = codes.data() + data_id * (this->m * this->nbits / 8);
-    __m256 simd_dist = _mm256_setzero_ps();
-    int q;
-    for (q = 0; q <= m - 8; q += 8)
+    for (int i = 0; i < m; i++)
     {
-        // 加载8个uint8_t值到128位寄存器
-        __m128i id_vec_128 = _mm_loadl_epi64(reinterpret_cast<const __m128i *>(ids.data() + q));
-        // __m128i id_vec_128 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(code + q));
-
-        // 扩展为32位整数
-        __m256i id_vec = _mm256_cvtepu8_epi32(id_vec_128);
-
-        // 创建偏移向量
-        __m256i offset_vec = _mm256_setr_epi32(
-            0 * code_nums, 1 * code_nums, 2 * code_nums, 3 * code_nums,
-            4 * code_nums, 5 * code_nums, 6 * code_nums, 7 * code_nums);
-
-        // 将偏移向量添加到id_vec中
-        id_vec = _mm256_add_epi32(id_vec, offset_vec);
-
-        // 使用gather指令从pq_dist_cache_data中获取距离值
-        __m256 dist_vec = _mm256_i32gather_ps(pq_dist_cache_data + q * code_nums, id_vec, 4);
-
-        // 累加距离值
-        simd_dist = _mm256_add_ps(simd_dist, dist_vec);
+        dist += pq_dist_cache_data[i * code_nums + ids[i]];
     }
-
-    // 将结果存储到数组中
-    float dist_array[8];
-    _mm256_storeu_ps(dist_array, simd_dist);
-    for (int i = 0; i < 8; ++i)
-    {
-        dist += dist_array[i];
-    }
-
-    // 处理剩余的元素
-    for (; q < m; q++)
-    {
-        dist += pq_dist_cache[q * code_nums + ids[q]];
-        // dist += pq_dist_cache[q * code_nums + code[q]];
-    }
-
     return dist;
-} */
-
-
-// float PQDist::calc_dist_pq_simd(int data_id, float *qdata, bool use_cache) {
-//     float dist = 0;
-//     std::vector<int> ids = get_centroids_id(data_id);
-//     __m256 simd_dist = _mm256_setzero_ps();
-//     int q;
-//     for (q = 0; q <= m - 8; q += 8) {
-//         __m256i id_vec = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ids.data() + q));
-//         __m256i offset_vec = _mm256_setr_epi32(
-//             0 * code_nums, 1 * code_nums, 2 * code_nums, 3 * code_nums,
-//             4 * code_nums, 5 * code_nums, 6 * code_nums, 7 * code_nums
-//         );
-//         id_vec = _mm256_add_epi32(id_vec, offset_vec);
-
-//         __m256 dist_vec = _mm256_i32gather_ps(pq_dist_cache_data + q * code_nums, id_vec, 4);
-
-//         simd_dist = _mm256_add_ps(simd_dist, dist_vec);
-//     }
-
-//     float dist_array[8];
-//     _mm256_storeu_ps(dist_array, simd_dist);
-//     for (int i = 0; i < 8; ++i) {
-//         dist += dist_array[i];
-//     }
-
-//     for (; q < m; q++) {
-//         dist += pq_dist_cache[q * code_nums + ids[q]];
-//     }
-
-//     return dist;
-// }
-
-
-float PQDist::calc_dist_pq_simd(int data_id, float *qdata, bool use_cache) {
-    int dist = 0;
+}
+float PQDist::calc_dist_pq_simd_quantized(int data_id, float *qdata, bool use_cache)
+{
+    long dist = 0;
     std::vector<uint8_t> ids = get_centroids_id(data_id);
-    for(int i = 0; i < m; i++) {
-        dist += pq_dist_cache_quantized[i*code_nums + ids[i]];
+    switch (qtype)
+    {
+    case QuantizationType::UINT8:
+        for (int i = 0; i < m; i++)
+        {
+            dist += pq_dist_cache_data_quantized_uint8[i * code_nums + ids[i]];
+        }
+        break;
+    case QuantizationType::UINT16:
+        for (int i = 0; i < m; i++)
+        {
+            dist += pq_dist_cache_data_quantized_uint16[i * code_nums + ids[i]];
+        }
+        break;
+    case QuantizationType::UINT32:
+        for (int i = 0; i < m; i++)
+        {
+            dist += pq_dist_cache_data_quantized_uint32[i * code_nums + ids[i]];
+        }
+        break;
     }
     return dist * scale + scaling_factors_min;
 }
-
-
 
 float PQDist::calc_dist_pq_loaded(int data_id)
 {
     return calc_dist_pq(data_id, qdata.data(), use_cache);
 }
-float PQDist::calc_dist_pq_loaded_(int data_id)
-{
-    return calc_dist_pq_(data_id, qdata.data(), use_cache);
-}
 float PQDist::calc_dist_pq_loaded_simd(int data_id)
 {
     return calc_dist_pq_simd(data_id, qdata.data(), use_cache);
+}
+float PQDist::calc_dist_pq_loaded_simd_quantized(int data_id)
+{
+    return calc_dist_pq_simd_quantized(data_id, qdata.data(), use_cache);
 }
 
 void PQDist::load(string filename)
@@ -364,7 +351,7 @@ void PQDist::load(string filename)
     fin.close();
 }
 
-vector<int> PQDist::encode_query(float *query)
+/* vector<int> PQDist::encode_query(float *query)
 {
     // return indexPQ->pq.centroids.data() + (quantizer*code_nums + code_id) * d_pq;
     vector<int> res;
@@ -384,8 +371,8 @@ vector<int> PQDist::encode_query(float *query)
         res.push_back(min_id);
     }
     return res;
-}
-void PQDist::construct_distance_table()
+} */
+/* void PQDist::construct_distance_table()
 {
     distance_table.resize(m);
     for (int i = 0; i < m; i++)
@@ -400,8 +387,8 @@ void PQDist::construct_distance_table()
             }
         }
     }
-}
-float PQDist::calc_dist_pq_from_table(int data_id, vector<int> &qids)
+} */
+/* float PQDist::calc_dist_pq_from_table(int data_id, vector<int> &qids)
 {
     float dist = 0;
     auto ids = get_centroids_id(data_id);
@@ -410,7 +397,7 @@ float PQDist::calc_dist_pq_from_table(int data_id, vector<int> &qids)
         dist += distance_table[q][ids[q]][qids[q]];
     }
     return dist;
-}
+} */
 /* void PQDist::quantize_lookup_table()
 {
     scaling_factors_min.resize(m);

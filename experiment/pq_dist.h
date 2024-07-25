@@ -12,15 +12,21 @@
 #include "../hnswlib/hnswlib.h"
 #include "dir_vector.h"
 using namespace std;
+enum class QuantizationType{
+    UINT8,
+    UINT16,
+    UINT32
+};
 class PQDist {
 public:
     PQDist() = default;
     ~PQDist() = default;
 
-    PQDist(int _d, int _m, int _nbits);
+    PQDist(int _d, int _m, int _nbits, QuantizationType _qtype=QuantizationType::UINT8);
     int d, m, nbits;
     int code_nums;
     int d_pq;
+    QuantizationType qtype;
     std::vector<uint8_t> codes;
     std::vector<float> centroids;
     std::unique_ptr<faiss::IndexPQ> indexPQ;
@@ -36,7 +42,9 @@ public:
 
 
     std::vector<float> pq_dist_cache;
-    std::vector<uint8_t> pq_dist_cache_quantized;
+    std::vector<uint8_t> pq_dist_cache_quantized_uint8;
+    std::vector<uint16_t> pq_dist_cache_quantized_uint16;
+    std::vector<uint32_t> pq_dist_cache_quantized_uint32;
     void clear_pq_dist_cache();
 
     std::vector<float> qdata;
@@ -47,20 +55,25 @@ public:
     float calc_dist_pq_loaded(int data_id);
     float calc_dist_pq_loaded_(int data_id);
     void load(std::string filename);
-    vector<int> encode_query(float* query);
-    vector<vector<vector<float>>> distance_table;
-    void construct_distance_table();
-    float calc_dist_pq_from_table(int data_id, vector<int>& qids);
+    //vector<int> encode_query(float* query);
+    //vector<vector<vector<float>>> distance_table;
+    //void construct_distance_table();
+    //float calc_dist_pq_from_table(int data_id, vector<int>& qids);
     float calc_dist_pq_simd(int data_id, float *qdata, bool use_cache);
     float calc_dist_pq_loaded_simd(int data_id);
-    void quantize_lookup_table();
-    float dequantize(uint8_t value, float min, float max);
+    float calc_dist_pq_loaded_simd_quantized(int data_id);
+    void  load_query_data_and_cache_quantized(const float *_qdata);
+    float calc_dist_pq_simd_quantized(int data_id, float *qdata, bool use_cache);
+    //void quantize_lookup_table();
+    //float dequantize(uint8_t value, float min, float max);
     float scaling_factors_min;
     float scaling_factors_max;
     float scale;
     
     float *pq_dist_cache_data;
-    uint8_t* pq_dist_cache_data_quantized;
+    uint8_t* pq_dist_cache_data_quantized_uint8;
+    uint16_t* pq_dist_cache_data_quantized_uint16;
+    uint32_t* pq_dist_cache_data_quantized_uint32;
 };
 
 #endif // !PQ_DIST_H
